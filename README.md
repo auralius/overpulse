@@ -51,7 +51,7 @@ https://github.com/user-attachments/assets/8dbacf89-0eab-4d13-8e8f-18bc4e772a5a
 - **Input shape to PeakNet1D:** **CHW `[2, 1, 256]`**
 - **Window stride:** **64 samples**
 - **Wireless transport:** ESP-NOW v1-compatible
-- **Channel:** 6
+- **Channel:** 6 (2.437 GHz)
 - **Transport pacing:** 2 ms
 - **CRC:** disabled in the latest fast baseline
 
