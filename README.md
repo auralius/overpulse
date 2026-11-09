@@ -176,12 +176,6 @@ A particularly important implementation detail:
 
 ---
 
-## License / release note
-
-This repository is prepared as a clean publication snapshot, without the historical incremental README files used during development.
-
----
-
 ## A final remark
 
 Yes, this may be the world's most overengineered heartbeat counter.
