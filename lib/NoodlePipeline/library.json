@@ -1,0 +1,7 @@
+{
+  "name": "NoodlePipeline",
+  "version": "0.1.0",
+  "description": "ESP-NOW CHW INT8 activation transport, separate from Noodle2 operators",
+  "frameworks": ["arduino"],
+  "platforms": ["espressif32", "espressif8266"]
+}

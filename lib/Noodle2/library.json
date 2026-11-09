@@ -1,0 +1,12 @@
+{
+  "name": "Noodle2",
+  "version": "0.1.15",
+  "description": "Portable CHW TinyML operators with automatic tiled Conv2D, forward-only parameter streaming and compiled graph arena",
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": "*",
+  "build": {
+    "srcDir": "src"
+  }
+}

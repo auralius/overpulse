@@ -1,0 +1,103 @@
+{
+  "format": "Noodle2 0.1.18 per-layer [weights][biases] little-endian",
+  "channels": [
+    "ir",
+    "red"
+  ],
+  "layout": "CHW",
+  "window": 256,
+  "sample_rate_hz": 100,
+  "input_scale": 0.03125,
+  "input_zero_point": 0,
+  "output_logit_scale": 0.0625,
+  "output_zero_point": 0,
+  "preprocess": "PPGPreprocess.h raw uint16 to q-int8, per-channel mean+MAD",
+  "q31_requant": "round-away-from-zero(acc * multiplier * 2^(shift-31)), saturate int8",
+  "layers": [
+    {
+      "name": "conv01",
+      "cin": 2,
+      "cout": 8,
+      "k": 9,
+      "input_scale": 0.03125,
+      "weight_scale": 0.004454875086236188,
+      "output_scale": 0.09716985374689102,
+      "multiplier": 1575265749,
+      "shift": -9,
+      "offset": 0,
+      "weight_count": 144,
+      "bias_offset": 144
+    },
+    {
+      "name": "conv02",
+      "cin": 8,
+      "cout": 16,
+      "k": 7,
+      "input_scale": 0.09716985374689102,
+      "weight_scale": 0.0028296289012188047,
+      "output_scale": 0.115329310297966,
+      "multiplier": 1310663387,
+      "shift": -8,
+      "offset": 176,
+      "weight_count": 896,
+      "bias_offset": 896
+    },
+    {
+      "name": "conv03",
+      "cin": 16,
+      "cout": 16,
+      "k": 7,
+      "input_scale": 0.115329310297966,
+      "weight_scale": 0.004245761811263918,
+      "output_scale": 0.28488603234291077,
+      "multiplier": 1889835449,
+      "shift": -9,
+      "offset": 1136,
+      "weight_count": 1792,
+      "bias_offset": 1792
+    },
+    {
+      "name": "conv04",
+      "cin": 16,
+      "cout": 16,
+      "k": 7,
+      "input_scale": 0.28488603234291077,
+      "weight_scale": 0.0044225538809468425,
+      "output_scale": 0.38808032870292664,
+      "multiplier": 1784812056,
+      "shift": -8,
+      "offset": 2992,
+      "weight_count": 1792,
+      "bias_offset": 1792
+    },
+    {
+      "name": "conv05",
+      "cin": 16,
+      "cout": 16,
+      "k": 1,
+      "input_scale": 0.38808032870292664,
+      "weight_scale": 0.003992969595541166,
+      "output_scale": 0.24332205951213837,
+      "multiplier": 1750555903,
+      "shift": -7,
+      "offset": 4848,
+      "weight_count": 256,
+      "bias_offset": 256
+    },
+    {
+      "name": "conv06",
+      "cin": 16,
+      "cout": 1,
+      "k": 1,
+      "input_scale": 0.24332205951213837,
+      "weight_scale": 0.0034356168874605433,
+      "output_scale": 0.0625,
+      "multiplier": 1838298508,
+      "shift": -6,
+      "offset": 5168,
+      "weight_count": 16,
+      "bias_offset": 16
+    }
+  ],
+  "parameter_bytes": 5188
+}
