@@ -14,6 +14,7 @@ public:
     bool begin(uint8_t node_id);
     bool peer(const uint8_t mac[6]);
     bool send(const uint8_t mac[6], const Packet& p, uint16_t body_bytes=0);
+    bool send_to(uint8_t node_id, const Packet& p, uint16_t body_bytes=0);
     bool poll(Message& out);
     uint32_t dropped() const { return dropped_; }
     const uint8_t* address() const { return local_mac_; }

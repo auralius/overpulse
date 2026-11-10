@@ -14,13 +14,23 @@ int main() {
         msg.p=packet(HELLO,id);
         msg.p.flags=1;
         msg.bytes=20;
-        msg.mac[0]=0x02;
-        msg.mac[5]=id;
+        assert(node_mac(id,msg.mac));
         receive_radio(msg);
         assert(workers[id].online);
     }
     assert(connected()==9);
     assert(idle_workers()==9);
+    Message spoof={};
+    spoof.p=packet(HELLO,9);
+    spoof.p.flags=1;
+    spoof.bytes=20;
+    assert(node_mac(8,spoof.mac));
+    workers[9].online=false;
+    receive_radio(spoof); // wrong sender MAC must not bring W9 online
+    assert(!workers[9].online);
+    assert(node_mac(9,spoof.mac));
+    receive_radio(spoof);
+    assert(workers[9].online);
     assert(select_worker()==1);
     workers[1].busy=true;
     assert(select_worker()==2);

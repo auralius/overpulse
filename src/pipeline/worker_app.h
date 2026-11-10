@@ -21,8 +21,6 @@ noodlepipe::NowLink radio;
 noodlepipe::Sender tx(PIPE_WORKER_ID);
 noodlepipe::Receiver rx(PIPE_WORKER_ID);
 noodlepipe::StageRunner runner;
-uint8_t host_mac[6]={};
-bool host_known=false;
 enum WorkerMode { FREE, COMPUTE, OUTPUT_READY, SENDING };
 WorkerMode mode=FREE;
 uint32_t active_frame=0;
@@ -31,10 +29,9 @@ uint32_t last_done=0,last_hello=0,last_compute_us=0;
 uint32_t errors=0,finished=0;
 
 void control(uint8_t kind,uint32_t frame,uint8_t stage,uint16_t size=0,uint32_t crc=0) {
-    if(!host_known)return;
     noodlepipe::Packet p=noodlepipe::packet(kind,PIPE_WORKER_ID,frame,stage);
     p.size=size;p.crc=crc;
-    radio.send(host_mac,p);
+    radio.send_to(noodlepipe::HOST_ID,p);
 }
 void advertise() {
     noodlepipe::Packet p=noodlepipe::packet(noodlepipe::HELLO,PIPE_WORKER_ID);
@@ -89,13 +86,8 @@ void execute(uint8_t stage,const int8_t* data,uint16_t len,uint32_t frame) {
 }
 void receive(const noodlepipe::Message& msg) {
     const noodlepipe::Packet& p=msg.p;
-    if(p.kind==noodlepipe::HELLO && p.sender==0) {
-        memcpy(host_mac,msg.mac,6);host_known=true;radio.peer(host_mac);
-        return;
-    }
-    if(p.kind==noodlepipe::PREPARE && p.stage==0 && p.sender==0 && !host_known) {
-        memcpy(host_mac,msg.mac,6);host_known=true;radio.peer(host_mac);
-    }
+    // Source addresses are verified against sender IDs by NowLink::receive.
+    if(p.kind==noodlepipe::HELLO && p.sender==noodlepipe::HOST_ID)return;
     // The sender owns output storage until all fragment ACKs are received.
     if(tx.handle(msg))return;
     if(p.kind==noodlepipe::DATA) {
@@ -112,11 +104,20 @@ void receive(const noodlepipe::Message& msg) {
         }
         return;
     }
-    if(!host_known || !noodlepipe::equal_mac(msg.mac,host_mac))return;
+    if(p.sender!=noodlepipe::HOST_ID ||
+       !noodlepipe::node_mac_matches(noodlepipe::HOST_ID,msg.mac))return;
     if(p.kind==noodlepipe::FORWARD && mode==OUTPUT_READY &&
        p.frame==active_frame && p.stage==completed_stage+1 &&
-       msg.bytes>=26) {
-        if(tx.start(radio,p.payload,p.frame,p.stage,runner.output(),runner.output_bytes())) {
+       msg.bytes==21) {
+        const uint8_t target_id=p.payload[0];
+        // Result must go to the host; intermediate tensors go to real workers.
+        const bool valid_target=(p.stage==noodlepipe::RESULT_STAGE)
+            ? (target_id==noodlepipe::HOST_ID)
+            : noodlepipe::worker_id_valid(target_id);
+        uint8_t target_mac[6];
+        if(valid_target && target_id!=PIPE_WORKER_ID &&
+           noodlepipe::node_mac(target_id,target_mac) &&
+           tx.start(radio,target_mac,p.frame,p.stage,runner.output(),runner.output_bytes())) {
             mode=SENDING;
         } else {++errors;control(noodlepipe::ERROR_PACKET,p.frame,p.stage);}
     } else if(p.kind==noodlepipe::RUN_LOCAL && mode==OUTPUT_READY &&
@@ -169,7 +170,7 @@ void loop() {
         control(noodlepipe::ERROR_PACKET,active_frame,completed_stage);
         Serial.println("WARN: transfer failed, preserving output");
     }
-    if(mode==OUTPUT_READY && host_known && (last_done==0 || now-last_done>=350)) {
+    if(mode==OUTPUT_READY && (last_done==0 || now-last_done>=350)) {
         control(noodlepipe::DONE,active_frame,completed_stage,runner.output_bytes(),
             noodlepipe::tensor_crc32(runner.output(),runner.output_bytes()));
         last_done=now?now:1;

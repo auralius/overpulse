@@ -5,7 +5,7 @@ NOODLE_SRC := $(wildcard lib/Noodle2/src/*.cpp)
 
 .PHONY: test test-bpm test-trained test-max30100-mock clean
 
-test: test-bpm test-nn-bpm test-trained test-max30100-mock test-max30100-tutorial-led test-dual-wave-display test-pipeline test-protocol test-transfer test-transfer-no-crc test-host-mock test-worker-mock test-esp8266-flash-mock test-host-admission test-worker-stats test-worker-registry test-worker9-mock
+test: test-bpm test-nn-bpm test-trained test-max30100-mock test-max30100-tutorial-led test-dual-wave-display test-pipeline test-protocol test-transfer test-transfer-no-crc test-host-mock test-worker-mock test-esp8266-flash-mock test-host-admission test-worker-stats test-worker-registry test-worker9-mock test-static-ids
 
 build:
 	mkdir -p build
@@ -95,3 +95,8 @@ test-worker9-mock: | build
 test-dual-wave-display: | build
 	$(CXX) -Itests/pipeline_stub -Itests/display_stub -Itests/esp32_capture_stub -Itests/esp32_stub $(CPPFLAGS) -DNOODLE_MAX_WORKERS=9 $(CXXFLAGS) -DARDUINO_ARCH_ESP32=1 -DARDUINO=1 -DNOODLE2_DEFAULT_ARENA_PSRAM=1 -include tests/display_stub/gpio_shim.h $(NOODLE_SRC) src/Max30100Raw.cpp tests/test_dual_wave_plot.cpp -o build/test_dual_wave_plot
 	./build/test_dual_wave_plot
+
+.PHONY: test-static-ids
+test-static-ids: | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -DNOODLE_MAX_WORKERS=9 tests/test_static_node_ids.cpp -o build/test_static_ids
+	./build/test_static_ids

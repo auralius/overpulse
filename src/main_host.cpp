@@ -313,8 +313,8 @@ noodlepipe::NowLink radio;
 noodlepipe::Sender host_tx(0);
 noodlepipe::Receiver host_rx(0);
 struct Node {
-    uint8_t mac[6];bool online,busy;uint32_t last_seen,jobs;
-    Node():mac{0},online(false),busy(false),last_seen(0),jobs(0){}
+    bool online,busy;uint32_t last_seen,jobs;
+    Node():online(false),busy(false),last_seen(0),jobs(0){}
 } workers[MAX_WORKERS+1]; // slot 0 is the host; workers are 1..MAX_WORKERS
 struct Frame {
     bool active,done,forward_pending;
@@ -381,13 +381,12 @@ void forward_command(Frame& f,uint32_t now) {
     if(f.last_forward && now-f.last_forward<450)return;
     noodlepipe::Packet p=noodlepipe::packet(f.local_handoff?noodlepipe::RUN_LOCAL:noodlepipe::FORWARD,
                                    0,f.id,f.forward_stage);
-    if(!f.local_handoff) {
-        const uint8_t* dest=f.forward_stage==noodlepipe::RESULT_STAGE
-          ? radio.address() : workers[f.worker].mac;
-        memcpy(p.payload,dest,6);
-    }
+    // All devices derive the same MAC from this ID; no MAC in FORWARD payload.
+    if(!f.local_handoff)
+        p.payload[0]=f.forward_stage==noodlepipe::RESULT_STAGE
+                     ? noodlepipe::HOST_ID : f.worker;
     if(workers[f.source_worker].online &&
-       radio.send(workers[f.source_worker].mac,p,f.local_handoff?0:6))
+       radio.send_to(f.source_worker,p,f.local_handoff?0:1))
         f.last_forward=now?now:1;
 }
 void sync_nn_epoch(uint32_t current_epoch) {
@@ -424,9 +423,10 @@ void consume_result(Frame& f,const int8_t* logits) {
 void receive_radio(const noodlepipe::Message& m) {
     const noodlepipe::Packet& p=m.p;
     if(p.kind==noodlepipe::HELLO && noodlepipe::worker_id_valid(p.sender)) {
+        // Validate identity even in host-only tests which bypass NowLink::receive.
+        if(!noodlepipe::node_mac_matches(p.sender,m.mac))return;
         Node& node=workers[p.sender];
-        if(!node.online || !noodlepipe::equal_mac(node.mac,m.mac)) {
-            memcpy(node.mac,m.mac,6);radio.peer(node.mac);
+        if(!node.online) {
             Serial.printf("JOIN W%u %02X:%02X:%02X:%02X:%02X:%02X\n",p.sender,
                           m.mac[0],m.mac[1],m.mac[2],m.mac[3],m.mac[4],m.mac[5]);
         }
@@ -449,7 +449,7 @@ void receive_radio(const noodlepipe::Message& m) {
         return;
     }
     if(!noodlepipe::worker_id_valid(p.sender) || !workers[p.sender].online ||
-       !noodlepipe::equal_mac(workers[p.sender].mac,m.mac))return;
+       !noodlepipe::node_mac_matches(p.sender,m.mac))return;
     workers[p.sender].last_seen=millis();
     if(p.kind==noodlepipe::RELEASE) {
         workers[p.sender].busy=false;
@@ -553,7 +553,9 @@ void try_launch() {
     f->id=next_frame++;f->start_ms=millis();f->progress_ms=f->start_ms;
     f->sample_end=seen;f->epoch=epoch;
     f->stage=0;f->worker=static_cast<uint8_t>(worker);
-    if(!host_tx.start(radio,workers[worker].mac,f->id,0,model_input,512)) {
+    uint8_t worker_address[6];
+    noodlepipe::node_mac(static_cast<uint8_t>(worker),worker_address);
+    if(!host_tx.start(radio,worker_address,f->id,0,model_input,512)) {
         f->active=false;return;
     }
     workers[worker].busy=true;++workers[worker].jobs;

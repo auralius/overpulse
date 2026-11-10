@@ -24,7 +24,9 @@ static_assert(NOODLE_TRANSPORT_CRC==0 || NOODLE_TRANSPORT_CRC==1,
               "NOODLE_TRANSPORT_CRC must be 0 or 1");
 namespace noodlepipe {
 static const uint16_t MAGIC = 0x324E;
-static const uint8_t VERSION = 2;
+// Version 3: deterministic STA MAC and one-byte destination worker ID in FORWARD.
+// Deliberately not wire-compatible with the dynamic-MAC version 2.
+static const uint8_t VERSION = 3;
 static const uint8_t HOST_ID = 0;
 static const uint8_t MAX_WORKERS = NOODLE_MAX_WORKERS;
 inline bool worker_id_valid(uint8_t id) { return id>=1 && id<=MAX_WORKERS; }
@@ -35,6 +37,19 @@ static const uint16_t MAX_PACKET = 250;
 static const uint16_t PAYLOAD = 230;
 static const uint8_t CHANNEL = 6;
 static const uint8_t BROADCAST[6] = {255,255,255,255,255,255};
+// Private, locally administered unicast prefix ('NDL'), unique per node ID.
+// Host ID 0 => 02:4E:44:4C:00:00; worker W9 => 02:4E:44:4C:00:09.
+// These are assigned to the actual Wi-Fi station interface by NowLink::begin().
+inline bool node_mac(uint8_t id, uint8_t out[6]) {
+    if (!out || (id != HOST_ID && !worker_id_valid(id))) return false;
+    out[0]=0x02; out[1]=0x4E; out[2]=0x44;
+    out[3]=0x4C; out[4]=0x00; out[5]=id;
+    return true;
+}
+inline bool node_mac_matches(uint8_t id, const uint8_t received[6]) {
+    uint8_t expected[6];
+    return received && node_mac(id,expected) && memcmp(received,expected,6)==0;
+}
 enum Kind : uint8_t { HELLO=1, PREPARE=2, PREPARED=3, DATA=4, ACK=5,
                      DONE=6, FORWARD=7, RELEASE=8, ERROR_PACKET=9, RUN_LOCAL=10 };
 #pragma pack(push,1)
