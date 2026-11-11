@@ -1,5 +1,5 @@
-.vscode/
 .pio/
 build/
 __pycache__/
 *.pyc
+.vscode/

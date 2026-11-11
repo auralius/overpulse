@@ -10,6 +10,7 @@
 class TFT_eSPI {
 public:
  unsigned green_lines=0,red_lines=0,yellow_circles=0;
+ int yellow_last_x=-1;
  int green_first_x=-1,red_first_x=-1;
  int green_last_x=-1,red_last_x=-1;
  int green_min_y=1000,green_max_y=-1000;
@@ -44,8 +45,8 @@ public:
    if(y2>red_max_y)red_max_y=y2;
   }
  }
- void fillCircle(int,int,int,uint32_t color) {
-  if(color==TFT_YELLOW)++yellow_circles;
+ void fillCircle(int x,int,int,uint32_t color) {
+  if(color==TFT_YELLOW) {++yellow_circles; yellow_last_x=x;}
  }
  template<typename... T>void printf(const char*,T...) {}
 };

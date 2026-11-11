@@ -2,8 +2,7 @@
 
 **Subtitle:** The World's Most Overengineered Heartbeat Counter  
 **Status:** Working distributed TinyML research demonstration, nine ESP8266 workers + one ESP32-S3 host  
-**Implementation documented:** `OVERPULSE_9Workers_Red_IR_DualWave_CRC_OFF.zip`, including the NN-versus-DSP BPM display and dual Red/IR traces  
-**Document date:** 10 November 2026
+**Implementation documented:** nine-worker Red/IR firmware with deterministic worker addressing, configurable selective acknowledgments, independent live waveforms, and NN-versus-DSP BPM  
 
 > **Scope and safety:** OVERPULSE is a research and educational demonstrator, **not a clinically validated heart-rate monitor, pulse oximeter, medical device, or diagnostic tool**. The neural peak detector was trained on **synthetic** PPG. The two displayed BPM values can disagree or remain unavailable; neither alone establishes cardiovascular health. A secondary bump in a PPG trace is not automatically a verified dicrotic notch or diastolic wave.
 
@@ -18,19 +17,19 @@
 | Sensor operating mode | SpO₂/HR dual-channel (`MODE=0x03`) |
 | Sampling rate | **100 samples/s per channel (100 Hz)**; no resampling |
 | MAX30100 register configuration | `SPO2_CONFIG=0x47` (100 Hz, 1,600 µs LED pulse, 16-bit), `LED_CONFIG=0x77` (Red ≈24 mA, IR ≈24 mA, default) |
-| Optional LED experiment | `PPG_LED_CONFIG=0x8F` (Red ≈27.1 mA, IR ≈50 mA); **not** the baseline |
+| Optional LED experiment | `PPG_LED_CONFIG=0x8F` (Red ≈27.1 mA, IR ≈50 mA); **not** the default configuration |
 | Input window | 256 samples/channel = **2.56 s** |
 | Model input | `INT8`, CHW `[2,1,256]` in Noodle2; semantically **`[IR,Red] × 256`** = 512 bytes |
 | Model output | `INT8` signed **256 peak logits**, one score for each source-sample position |
 | Window stride | **64 samples**, nominally **0.64 s**; **1.5625 windows/s** maximum new-window rate before load-related skips |
 | Model | PeakNet1D, **six Conv1D layers**, realized as Noodle2 Conv2D with height=1 |
 | Distributed execution | **Five stages**, the last stage executes Conv5 **and** Conv6 |
-| Wireless transport | ESP-NOW **v1-compatible**, channel **6**, 250-byte total packet, 20-byte protocol header, 230-byte activation fragment |
-| Transport v2 settings | 4-fragment window, bitmap ACK, selective retransmission, **2 ms** fragment pacing |
-| Software tensor CRC32 | **OFF** (`NOODLE_TRANSPORT_CRC=0`) in the latest working configuration; Wi-Fi frame-level FCS remains active |
+| Wireless transport | ESP-NOW on channel **6**; maximum packet 250 B, protocol header 20 B, activation fragment up to 230 B |
+| Transport ACK interval | `NOODLE_ACK_INTERVAL=18`; one 32-bit bitmap ACK per tensor in the no-loss case, selective retransmission, **1 ms** fragment pacing |
+| Software tensor CRC32 | **OFF** (`NOODLE_TRANSPORT_CRC=0`); Wi-Fi frame-level FCS remains active |
 | Scheduling | Host chooses an available worker dynamically; direct worker-to-worker activation handoffs |
 | Occupancy | `NOODLE_MAX_OCCUPANCY=5`, `NOODLE_HOST_OCCUPANCY=3`, `NOODLE_RESERVED_WORKERS=1` |
-| Measured observed latency | Roughly **830–860 ms** end-to-end distributed inference with CRC disabled, per the latest on-hardware observation; not a controlled statistical benchmark |
+| Measured observed latency | Approximately **700 ms** end-to-end distributed inference observed in the nine-worker hardware setup; not a controlled statistical benchmark |
 | Heart-rate estimates | Independent **NN BPM** from distributed PeakNet1D logits and **DSP BPM** from filtered-IR autocorrelation |
 
 ### Data-flow overview
@@ -320,9 +319,9 @@ int select_worker(int avoid = -1) {
 
 ; Other related settings
 -D NOODLE2_GRAPH_MAX_NODES=16
--D NOODLE_TRANSPORT_WINDOW=4
+-D NOODLE_ACK_INTERVAL=18
 -D NOODLE_TRANSPORT_CRC=0
--D NOODLE_ESPNOW_PACING_MS=2
+-D NOODLE_ESPNOW_PACING_MS=1
 -D NOODLE2_DEFAULT_ARENA_PSRAM=1
 -D PPG_LED_CONFIG=0x77
 ```
@@ -334,9 +333,9 @@ int select_worker(int avoid = -1) {
 | `NOODLE_HOST_OCCUPANCY` | Host admission-credit ceiling, **not** number of busy workers | **3** | At most three outstanding frames are admitted at once; stricter than five frame slots |
 | `NOODLE_RESERVED_WORKERS` | Number of idle workers that **new host frame admission** must leave spare | **1** | Prevents the host from greedily using the last idle worker; an existing frame **may** consume it |
 | `NOODLE2_GRAPH_MAX_NODES` | Maximum nodes allocated for one **neural model graph**, not MCU count | **16** | No effect on maximum worker IDs |
-| `NOODLE_TRANSPORT_WINDOW` | Fragments per selective-ACK group | **4** | Up to four 230-byte fragments sent per ACK bitmap group |
+| `NOODLE_ACK_INTERVAL` | Maximum fragments per bitmap-ACK group | **18** | A single ACK bitmap covers each tensor (up to 18 fragments); host and workers must match |
 | `NOODLE_TRANSPORT_CRC` | Optional whole-tensor software CRC32 | **0 (OFF)** | Saves CPU by skipping that checksum; sender and receiver settings must agree |
-| `NOODLE_ESPNOW_PACING_MS` | Minimum interval between sending consecutive DATA fragments | **2 ms** | Communication pacing, not a model-computation delay |
+| `NOODLE_ESPNOW_PACING_MS` | Minimum interval between sending consecutive DATA fragments | **1 ms** | Transmission pacing, not a model-computation delay |
 | `NOODLE_WORKER_ACTIVATION_STATS` | Optional worker-side zero count, sparsity %, min/max after compute | **0 (OFF)** | Turn on for diagnostics; turn off for timing tests |
 
 **Admission rule from `NoodleAdmission.h`:**
@@ -352,19 +351,19 @@ For one online worker, `effective_reserve` becomes **zero** so single-worker tes
 ### 6.2 Stage transition and same-worker fallback
 
 1. When a worker sends `DONE`, the host checks for an idle different worker; it prefers the one with the fewest jobs.
-2. If found, the host sends `FORWARD` to the previous worker containing the destination MAC. The source worker transfers the output tensor **directly** to the new worker.
+2. If found, the host sends `FORWARD` to the previous worker containing only the destination node ID. The source worker transfers the output tensor **directly** to the new worker.
 3. If no different worker is available, the current code **still waits up to approximately 500 ms** and then uses `RUN_LOCAL` on the same worker. This fallback is part of the present source and should not be mistaken for a removed delay.
 4. The host retries outstanding forwarding commands on a **450 ms** interval; a frame with no progress for **30 seconds** is aborted. A possibly-busy worker is not blindly marked idle after an aborted frame.
 5. Workers periodically broadcast `HELLO` (nominally every **1 s**), with an available/busy flag. Workers older than **5 s** since last contact are excluded from selection.
 
 ### 6.3 Why nine worker LEDs do not all light simultaneously
 
-The source generates an eligible 256-sample input window only every **64 sensor samples**: about **1.56 input frames/s**. The observed **830–860 ms** is *individual frame latency*, not the fixed interval between frame launches or necessarily the sustained completed-frame throughput. Multiple frames can overlap.
+The source generates an eligible 256-sample input window only every **64 sensor samples**: about **1.56 input frames/s**. The observed **~700 ms** in the current experiment is *individual frame latency*, not the fixed interval between frame launches or necessarily the sustained completed-frame throughput. Multiple frames can overlap.
 
 A rough steady-state in-flight estimate (assuming throughput keeps up) is:
 
 \[
-\text{in-flight frames} \approx 1.5625\ \text{frames/s}\times 0.845\ \text{s}\approx 1.32.
+\text{in-flight frames} \approx 1.5625\ \text{frames/s}\times 0.700\ \text{s}\approx 1.09.
 \]
 
 Thus the host's three-frame credit limit is not continually saturated. Nine workers do not mean nine simultaneously executing convolutions; each worker's compute LED also excludes radio time and idle time. Increasing occupancy alone cannot create more fresh sensor windows. Lowering the stride would generate **more overlapping windows**, not more independent PPG information.
@@ -373,14 +372,14 @@ Thus the host's three-frame credit limit is not continually saturated. Nine work
 
 ## 7. ESP-NOW transport protocol
 
-The current transport is **custom application Transport v2 over ESP-NOW v1-compatible frames**. This is *not* ESP-NOW v2's extended 1,470-byte packet format, which cannot be assumed for ESP8266 nodes.
+The transport uses **NoodleTransport with configurable selective acknowledgments over ESP-NOW**. Every data frame respects the 250-byte payload limit supported by ESP8266 devices; larger extended ESP-NOW packets are not used.
 
 | Wire feature | Implementation |
 |---|---|
 | Radio role | Station mode, Wi-Fi sleep disabled, all nodes on channel **6**; no access point required |
-| Worker discovery | Broadcast `HELLO`; host registers MAC address and online/busy state |
+| Worker discovery | Broadcast `HELLO`; host validates the deterministic source MAC against worker ID and tracks online/busy state |
 | Application packet | **250 B maximum**, including **20 B** packed protocol header and up to **230 B** INT8 payload |
-| Transfer handshake | `PREPARE` → `PREPARED` → `DATA` groups → bitmap `ACK` |
+| Transfer handshake | `PREPARE` → `PREPARED` → `DATA` groups → bitmap `ACK`; `ACK_REQUEST` on timeout |
 | Reliability | Selective resend of missing fragments, **140 ms** transport timeout, maximum **15** retry rounds as coded |
 | Computation control | `DONE`, `FORWARD`, `RUN_LOCAL`, `RELEASE`, `ERROR_PACKET` |
 | Tensor framing | Frame ID, stage, fragment index, declared tensor size, CRC-mode flag |
@@ -399,11 +398,40 @@ The current transport is **custom application Transport v2 over ESP-NOW v1-compa
 | Stage 4 → host | 256 | 2 |
 | **Total** | **15,104 B** | **68 DATA packets** |
 
-These counts exclude PREPARE/PREPARED, ACK, DONE/FORWARD/RELEASE, retries and retransmissions. `RUN_LOCAL` may avoid intermediate tensor transmissions. No sparse bitmap compression, RLE, UDP, or Wi-Fi Mesh backend is enabled in this version.
+These counts exclude PREPARE/PREPARED, ACK, DONE/FORWARD/RELEASE, retries and retransmissions. `RUN_LOCAL` may avoid intermediate tensor transmissions. Sparse bitmap compression, RLE, UDP, and Wi-Fi Mesh are not implemented in this project.
 
 The model parameters do **not** travel with each frame: they are stored in **every ESP8266's Flash**. Only activation tensors are transmitted.
 
 ---
+
+
+### 7.1 Deterministic node identities and direct forwarding
+
+The host has node ID **0**; workers have unique compile-time `PIPE_WORKER_ID` values **1–9**. At startup, each node assigns its Wi-Fi station interface a locally administered address derived from its ID:
+
+```text
+02:4E:44:4C:00:00   Host
+02:4E:44:4C:00:01   Worker 1
+...
+02:4E:44:4C:00:09   Worker 9
+```
+
+Each node registers the applicable ESP-NOW peers, while the host tracks their availability using `HELLO`, `DONE`, `RELEASE`, and timeouts. A `FORWARD` control packet carries only the **destination worker ID**; the sender derives that worker's MAC and transfers the activation directly to it. The host coordinates scheduling but does not relay intermediate activation data. A deterministic MAC is an address convention, **not** authentication or encryption; IDs must be unique, and failed handoffs are not guaranteed to recover automatically.
+
+### 7.2 Fragmentation, whole-tensor ACK bitmap, and retries
+
+Each DATA packet carries up to **230 bytes** of INT8 activation. `NOODLE_ACK_INTERVAL=18` allows the sender to transmit up to 18 numbered fragments before receiving an acknowledgment bitmap. The largest **4,096-byte** activation requires 18 fragments, so a clean transfer uses **one application-level bitmap ACK**. Smaller tensors also use one ACK each.
+
+| Activation | Tensor size | DATA fragments | ACKs with no loss |
+|---|---:|---:|---:|
+| Raw NN input | 512 B | 3 | 1 |
+| Conv1 output | 2,048 B | 9 | 1 |
+| Conv2, Conv3, or Conv4 output | 4,096 B | 18 | 1 |
+| Final output logits | 256 B | 2 | 1 |
+
+The ACK reuses a 32-bit packet field as a fragment-reception bitmap, independent of the optional tensor CRC32. Missing fragments are **selectively retransmitted**. On a missing final fragment or lost ACK, an `ACK_REQUEST` after the **140 ms** transfer timeout asks for the receiver's current bitmap; retry rounds are limited to **15**. Sending DATA is paced at **1 ms** per fragment. Both ends must use the same ACK interval and CRC mode; the receiver checks these when accepting `PREPARE`. All devices must run compatible packet formats and configuration flags.
+
+The deployed configuration disables the extra application-level tensor CRC32 (`NOODLE_TRANSPORT_CRC=0`), but retains the radio's frame checking, packet IDs, lengths, ACKs, and retries. This is a latency/reliability trade-off appropriate for experiments, **not** a guarantee of end-to-end integrity.
 
 ## 8. NN BPM versus DSP BPM
 
@@ -424,13 +452,74 @@ It accepts a candidate when it is a local logit maximum above **18**, ignoring t
 
 Then `NN BPM ≈ round(6000 / median_interval_in_samples)` at 100 Hz. This is deliberately conservative; its output may be `---`. It does **not** copy the DSP value when NN peak detection is unreliable.
 
-### 8.2 DSP-derived heart rate (independent reference)
+### 8.2 NN peak validation and median-based rhythm consistency
+
+The neural network emits **256 signed INT8 logits per 256-sample window**. These are *candidate peak scores*, not beats, probabilities, or a direct BPM estimate. `src/NnBpmEstimator.h` turns them into a defensible, though **non-clinical**, heart-rate estimate using the following steps. This is separate from the host's autocorrelation-based `BpmEstimator`.
+
+**Step 1 — Detect candidate peaks in each NN output window.** Examine positions `13 ... 242` (inclusive), excluding the outer 13 samples at either end to avoid incomplete convolution context. A candidate at index `i` must satisfy:
+
+```cpp
+logits[i] >= 18 &&
+logits[i] >= logits[i - 1] &&
+logits[i] >  logits[i + 1]
+```
+
+The asymmetry in the local-maximum test gives deterministic handling of equal neighboring scores. The threshold `18` applies to a **signed INT8 logit**, not a calibrated probability.
+
+**Step 2 — Recover the physical sample time.** Each accepted candidate is mapped to its original absolute 100 Hz sample index:
+
+```text
+absolute_beat_sample = window_end - 256 + i
+```
+
+`window_end` is exclusive. Using sample indices, rather than ESP-NOW completion timestamps, prevents variable wireless latency from distorting the beat-to-beat intervals. Returned windows may overlap (64-sample stride) or arrive out of order.
+
+**Step 3 — Deduplicate detections across overlapping windows.** Two candidate peaks separated by **fewer than 50 samples (0.50 s)** compete for one event. The higher INT8 score wins; if scores tie, the earlier sample wins. Events remain sorted by their original sample index. The estimator keeps at most **32 events** within a **1,200-sample (12 s)** rolling history, using fixed-size arrays and no dynamic allocations. The 50-sample exclusion rule limits duplicate detections but also makes the detector unsuitable for faster rhythms without reconfiguration.
+
+**Step 4 — Demand enough recent peaks.** Before calculating BPM, the estimator requires at least **five** accepted events (therefore four successive intervals). Its latest event must be no more than **300 samples (3 s)** old. Otherwise NN BPM is invalid (`---`); it does not silently borrow DSP BPM.
+
+**Step 5 — Compute intervals and apply a physiological search gate.** For sorted beat sample positions `p[0] ... p[n-1]`, form:
+
+\[
+\Delta_i = p_i-p_{i-1},\qquad i=1,\ldots,n-1.
+\]
+
+Each interval must be in the **inclusive range 50–133 samples** at 100 Hz (about **120–45 BPM**). A missed detection can produce a doubled interval; an extra detection can produce an unusually short interval. Either can invalidate the current estimate.
+
+**Step 6 — Test rhythm consistency against the median.** The code insertion-sorts the short interval array and chooses `intervals[m/2]` for `m=n-1` intervals (the **upper middle value** when `m` is even). Call this `M`. Every observed interval must pass:
+
+\[
+\boxed{4\lvert\Delta_i-M\rvert\le M}
+\qquad\Longleftrightarrow\qquad
+\lvert\Delta_i-M\rvert\le 0.25M.
+\]
+
+**All** intervals must pass, not just a majority. This makes the output conservative and can reject a real irregular rhythm as well as faulty detections; **it is a detector-quality gate, not an arrhythmia diagnosis**.
+
+**Step 7 — Convert the median interval to BPM.** For the current sampling rate `f_s = 100 Hz`:
+
+\[
+\boxed{\mathrm{NN\ BPM}=\operatorname{round}\!\left(\frac{60f_s}{M}\right)
+=\operatorname{round}\!\left(\frac{6000}{M}\right)}.
+\]
+
+The actual firmware uses integer rounding: `(6000u + M/2u) / M`.
+
+**Example (approximately 54 BPM).** Suppose the accepted event positions are `100, 211, 322, 432, 544`. Their intervals are `111, 111, 110, 112` samples. After sorting: `[110, 111, 111, 112]`; `M = 111`. Every interval is within ±25% of 111 and within 50–133 samples, so the result is `round(6000 / 111) = 54 BPM`.
+
+**Rejected example.** If the intervals are `111, 110, 75, 112`, their median is 111, but `|75 - 111| = 36 > 111/4`; the NN BPM is invalid rather than reporting a misleading value. A missed peak yielding an interval of 220 samples fails the 50–133 range check even earlier.
+
+**Why NN BPM initially appears slowly.** At 54 BPM, four complete beat intervals span approximately `4 × (60/54) = 4.44 s`, before accounting for the initial 256-sample inference window, 64-sample window-hop alignment, or distributed execution delay. A noisy or missed candidate can delay a valid estimate further. The DSP estimator can become valid on a different timetable because it uses a 10-second autocorrelation history, not this five-event consistency rule.
+
+**Limitations.** `NN BPM = DSP BPM` on one recording is encouraging, but both algorithms analyze data from the *same optical sensor*. Agreement does not establish medical accuracy. The ±25% rule and 45–120 BPM search interval are engineering quality constraints selected for this demonstration; they would require validation and possibly redesign for clinical, pediatric, athletic, or arrhythmia applications.
+
+### 8.3 DSP-derived heart rate (independent reference)
 
 `BpmEstimator` receives the **twice-filtered IR** waveform, collects **1,000 samples (10 s)** and computes normalized autocorrelation over candidate lags **49–134**, selecting qualifying *interior* local maxima with correlation **greater than 0.34**. Accepted BPM is rounded from `6000 / best_lag`, subject to a **45–120 BPM** range and a nontrivial-signal-energy gate.
 
 This is a conventional signal-processing comparator, not ground truth. Neither estimator has undergone a controlled clinical validation study.
 
-### 8.3 TFT presentation
+### 8.4 TFT presentation
 
 - **Green upper graph:** IR AC waveform, approximately 0.3–4 Hz filtering.
 - **Red lower graph:** Red AC waveform, same filter coefficients but separate state and vertical scaling.
@@ -439,13 +528,21 @@ This is a conventional signal-processing comparator, not ground truth. Neither e
 - **Cyan score strip:** raw signed INT8 logits for visual inspection; not calibrated probabilities.
 - **Latency:** host dispatch → returned result, excluding the 2.56-second physical window acquisition time.
 
+**Independent live visualization:** The ESP32-S3 displays
+Red and IR AC samples directly from the sensor's ring buffer on a periodic
+`PPG_UI_REFRESH_MS=400` schedule. The chart is no longer gated by
+`FRAME_DONE` or the availability of any worker. NN peak markers, if available,
+are placed by original sample index; stale markers automatically scroll away.
+The signal-processing filters and the DSP autocorrelation estimator are
+separate from neural-network inference. Wireless failure does not stop live sensor visualization.
+
 The two optical waveforms looked nearly identical in initial physical observation. That does not establish the presence or absence of a true diastolic wave. A narrow secondary peak may be changed by finger pressure, optical settings, or the display filter; proper morphology analysis should inspect raw timestamped samples and a larger, controlled dataset.
 
 ---
 
 ## 9. Reproducibility and build configuration
 
-**Actual latest project entry points:**
+**Project entry points:**
 
 ```text
 platformio.ini
@@ -478,7 +575,7 @@ Use the actual port names for each board. Different workers must have **unique I
 
 ### Observations versus validation status
 
-- **Observed on hardware:** nine workers joined and ran; Red/IR traces shown; user-reported distributed latency around **830–860 ms** with software CRC disabled. These are engineering observations, not a formal repeatability study.
+- **Observed on hardware:** nine workers joined and ran; Red/IR traces shown; user-reported distributed latency around **700 ms** with ACK interval 18, 1 ms pacing, and software CRC disabled. This is an engineering observation, not a formal repeatability study.
 - **Validated in desktop source tests:** integer-exact output matched the reference golden vector (**256/256 logits**), protocol/packet-loss simulations, worker registration, filter/display mocks, and NN BPM synthetic tests.
 - **Not yet established:** sensitivity/specificity of systolic peak detection on independent real-world subjects, NN/DSP agreement statistics, performance of the nine-worker system under saturated synthetic load, clinical correctness of the secondary-wave interpretation, or any medical performance claim.
 
@@ -496,6 +593,6 @@ Use the actual port names for each board. Different workers must have **unique I
 
 ### Primary source files used for this document
 
-All technical statements above were checked against the supplied latest project source, especially `platformio.ini`, `main_host.cpp`, `Max30100Raw.cpp`, `PPGPreprocess.h`, `BpmEstimator.h`, `NnBpmEstimator.h`, `StageRunner.h`, `worker_app.h`, `NoodleAdmission.h`, `PipelineProtocol.h`, `PipelineTransfer.h`, `Noodle2Graph.h`, `peaknet_ppg_model.h`, and `model_manifest.json`. The user-reported hardware latency and observed Red/IR similarity are distinguished from code-defined constants and automated tests.
+The implementation details above were checked against the supplied project source, especially `platformio.ini`, `main_host.cpp`, `Max30100Raw.cpp`, `PPGPreprocess.h`, `BpmEstimator.h`, `NnBpmEstimator.h`, `StageRunner.h`, `worker_app.h`, `NoodleAdmission.h`, `PipelineProtocol.h`, `PipelineTransfer.h`, `Noodle2Graph.h`, `peaknet_ppg_model.h`, and `model_manifest.json`. The user-reported hardware latency and observed Red/IR similarity are distinguished from code-defined constants and automated tests.
 
 **OVERPULSE: nine wireless workers, one ESP32-S3 host, and one heartbeat — a demonstration of Noodle2 and a very enthusiastic interpretation of distributed computing.**

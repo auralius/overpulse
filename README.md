@@ -21,10 +21,13 @@ The project began as an intentionally overengineered heartbeat counter, but it a
 
 ## Hardware
 
-https://github.com/user-attachments/assets/8dbacf89-0eab-4d13-8e8f-18bc4e772a5a
-
+![OVERPULSE hardware setup](docs/overpulse_hardware.jpg)
 
 **Shown above:** the ESP32-S3 CYD host, the MAX30100 sensor, and a 9-worker ESP8266 setup used for the latest OVERPULSE experiments.
+
+The current acquisition driver targets **MAX30100**; MAX30102 is a future
+host-side sensor-driver upgrade and is **not yet supported** by this package.
+
 
 ---
 
@@ -35,8 +38,10 @@ https://github.com/user-attachments/assets/8dbacf89-0eab-4d13-8e8f-18bc4e772a5a
 - **Up to 9 ESP8266 workers** with the full model stored in Flash on every worker
 - **NN BPM** estimated from neural peak detections
 - **DSP BPM** estimated independently from filtered IR autocorrelation
-- **Dual waveform display** on the CYD: **Red** and **IR** traces shown simultaneously
+- **Independent live waveform display** on the CYD: **Red** and **IR** traces continue even if no ESP8266 is online
 - **CRC optional** transport mode (`NOODLE_TRANSPORT_CRC=0/1`)
+- **Configurable selective ACK interval**: 4 (baseline), 8, or 18 (one bitmap ACK for 4 KiB tensors)
+- **ACK_REQUEST recovery** for lost final fragments and lost group acknowledgments
 - **Host admission and occupancy control** for multi-frame pipeline scheduling
 
 ---
@@ -51,8 +56,10 @@ https://github.com/user-attachments/assets/8dbacf89-0eab-4d13-8e8f-18bc4e772a5a
 - **Input shape to PeakNet1D:** **CHW `[2, 1, 256]`**
 - **Window stride:** **64 samples**
 - **Wireless transport:** ESP-NOW v1-compatible
-- **Channel:** 6 (2.437 GHz)
+- **Channel:** 6
 - **Transport pacing:** 2 ms
+- **ACK interval:** 4 fragments (baseline); 18 is whole-tensor experimental mode
+- **Application protocol:** v4 (deterministic MAC and ID-only forwarding retained)
 - **CRC:** disabled in the latest fast baseline
 
 Observed end-to-end latency in the latest working setup was about **830–860 ms** with CRC disabled.
@@ -110,6 +117,12 @@ pio run -e worker9 -t upload
 
 ---
 
+## Deterministic worker identities (protocol v3)
+
+Each device uses a fixed, locally administered Wi-Fi station MAC derived from its node ID: host `02:4E:44:4C:00:00`, workers W1..W9 `02:4E:44:4C:00:01` through `...:09`. The host sends only the **destination worker ID** in `FORWARD`, and workers derive the MAC locally. All peers are registered at boot. This is **not cryptographic authentication**.
+
+**Important:** Reflash **all 10 devices** when upgrading to ACK-interval protocol v4. It intentionally rejects protocol v3 messages and mismatched ACK interval or CRC settings. See `TECHNICAL_DETAILS.md` for implementation details.
+
 ## Configuration knobs
 
 Some key build flags currently used:
@@ -120,11 +133,46 @@ Some key build flags currently used:
 -D NOODLE_HOST_OCCUPANCY=3
 -D NOODLE_RESERVED_WORKERS=1
 -D NOODLE_TRANSPORT_CRC=0
+-D NOODLE_ACK_INTERVAL=4
 -D NOODLE_ESPNOW_PACING_MS=2
 -D PPG_LED_CONFIG=0x77
 ```
 
 These control worker scaling, admission policy, reserved handoff capacity, transport integrity mode, pacing, and LED drive current.
+
+---
+
+## ACK interval experiment (NoodleTransport, protocol v4)
+
+A 4,096-byte activation tensor occupies **18 ESP-NOW DATA packets** (up to 230 bytes each).
+The ACK interval controls the maximum number of consecutive fragments sent before
+waiting for a bitmap acknowledgment:
+
+| `NOODLE_ACK_INTERVAL` | ACK packets on a clean 4 KiB transfer | Expected behavior |
+|---:|---:|---|
+| `4` | 5 | **Default**, reproduces current 4-fragment ACK grouping |
+| `8` | 3 | Intermediate setting |
+| `18` | 1 | Whole-tensor bitmap ACK for the largest activation |
+
+For a first A/B test, change **both** `[env:host]` and `[esp8266_common]` in `platformio.ini`:
+
+```ini
+-D NOODLE_ACK_INTERVAL=18
+```
+
+Keep `NOODLE_ESPNOW_PACING_MS=2`, `NOODLE_TRANSPORT_CRC=0`, and the same
+occupancy settings during the comparison. All ten boards need v4 firmware with
+**matching ACK intervals**. The receiver rejects mismatched configurations.
+
+The bitmap is 32-bit, carried in the existing ACK packet's `crc` field (not a
+CRC check); all tensor bytes remain unchanged. A missing final DATA packet or
+ACK is recovered using `ACK_REQUEST` and selective retransmission. The new
+interval does **not** remove per-packet radio pacing, and fewer ACKs do not
+necessarily guarantee better performance on a busy channel.
+
+Run local regression tests with `make test`. The tests simulate packet loss,
+ACK loss, last-fragment loss, and exact INT8 inference; real-device performance
+must be benchmarked separately.
 
 ---
 
@@ -171,16 +219,28 @@ A particularly important implementation detail:
 - **The neural network does _not_ receive the filtered display waveform.**
 - PeakNet1D uses the **raw IR and Red samples**, normalized per 256-sample window using mean and MAD.
 - The host-side filters are used for:
-  - **waveform display**, and
+  - **live waveform display**, and
   - the independent **DSP BPM** estimator.
+
+---
+
+## License / release note
+
+This repository is prepared as a clean publication snapshot, without the historical incremental README files used during development.
+
+---
+
+## Live waveform display (host-side update)
+
+The ESP32-S3 updates both Red/IR traces directly from its filtered sensor ring
+about every **400 ms** (`PPG_UI_REFRESH_MS=400`) whether workers are online,
+frames have completed, or NN BPM is valid. NN markers are time-aligned to
+their original samples and disappear as they leave the scrolling window.
+DSP BPM remains fully independent of wireless inference.
 
 ---
 
 ## A final remark
 
 Yes, this may be the world's most overengineered heartbeat counter.
-And yes, we are still irrationally proud of it.
-
----
-
-
+And **yes, we are still irrationally proud of it**.

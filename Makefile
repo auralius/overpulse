@@ -5,7 +5,7 @@ NOODLE_SRC := $(wildcard lib/Noodle2/src/*.cpp)
 
 .PHONY: test test-bpm test-trained test-max30100-mock clean
 
-test: test-bpm test-nn-bpm test-trained test-max30100-mock test-max30100-tutorial-led test-dual-wave-display test-pipeline test-protocol test-transfer test-transfer-no-crc test-host-mock test-worker-mock test-esp8266-flash-mock test-host-admission test-worker-stats test-worker-registry test-worker9-mock test-static-ids
+test: test-bpm test-nn-bpm test-trained test-max30100-mock test-max30100-tutorial-led test-dual-wave-display test-pipeline test-protocol test-transfer test-transfer-no-crc test-transfer-ack8 test-transfer-ack18 test-transfer-ack18-crc test-host-mock test-worker-mock test-esp8266-flash-mock test-host-admission test-worker-stats test-worker-registry test-worker9-mock test-static-ids
 
 build:
 	mkdir -p build
@@ -52,6 +52,21 @@ test-transfer: | build
 test-transfer-no-crc: | build
 	$(CXX) -DNOODLE_TRANSPORT_CRC=0 -Itests/transfer_stub -Ilib/NoodlePipeline/src -Isrc $(CXXFLAGS) tests/test_transfer.cpp -o build/test_transfer_no_crc
 	./build/test_transfer_no_crc
+
+
+# Parameter sweep: ACK every 8 or 18 fragments (18 = whole 4KB tensor).
+.PHONY: test-transfer-ack8 test-transfer-ack18 test-transfer-ack18-crc
+test-transfer-ack8: | build
+	$(CXX) -DNOODLE_ACK_INTERVAL=8 -DNOODLE_TRANSPORT_CRC=0 -Itests/transfer_stub -Ilib/NoodlePipeline/src -Isrc $(CXXFLAGS) tests/test_transfer.cpp -o build/test_transfer_ack8
+	./build/test_transfer_ack8
+
+test-transfer-ack18: | build
+	$(CXX) -DNOODLE_ACK_INTERVAL=18 -DNOODLE_TRANSPORT_CRC=0 -Itests/transfer_stub -Ilib/NoodlePipeline/src -Isrc $(CXXFLAGS) tests/test_transfer.cpp -o build/test_transfer_ack18
+	./build/test_transfer_ack18
+
+test-transfer-ack18-crc: | build
+	$(CXX) -DNOODLE_ACK_INTERVAL=18 -DNOODLE_TRANSPORT_CRC=1 -Itests/transfer_stub -Ilib/NoodlePipeline/src -Isrc $(CXXFLAGS) tests/test_transfer.cpp -o build/test_transfer_ack18_crc
+	./build/test_transfer_ack18_crc
 
 test-host-mock: | build
 	$(CXX) -Itests/pipeline_stub -Itests/display_stub -Itests/esp32_capture_stub -Itests/esp32_stub $(CPPFLAGS) -DNOODLE_MAX_WORKERS=9 $(CXXFLAGS) -DARDUINO_ARCH_ESP32=1 -DARDUINO=1 -DNOODLE2_DEFAULT_ARENA_PSRAM=1 -include tests/display_stub/gpio_shim.h $(NOODLE_SRC) src/Max30100Raw.cpp src/main_host.cpp tests/esp32_stub/entry.cpp -o build/test_host_mock

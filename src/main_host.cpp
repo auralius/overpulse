@@ -33,6 +33,9 @@
 #ifndef PPG_DEBUG_CSV
 #define PPG_DEBUG_CSV 0
 #endif
+#ifndef PPG_UI_REFRESH_MS
+#define PPG_UI_REFRESH_MS 400 // ~2.5 live plot updates/s; avoid starving ESP-NOW
+#endif
 
 #ifndef NOODLE_MAX_OCCUPANCY
 #define NOODLE_MAX_OCCUPANCY 3
@@ -85,6 +88,11 @@ uint16_t raw_ir[W],raw_red[W];
 int16_t ac_ir_wave[W], ac_red_wave[W];
 int8_t model_input[2*W],model_logits[W];
 uint8_t marks[W]={};
+// NN marker positions refer to an absolute source-sample window, not screen
+// pixels. Never draw stale markers at the wrong location as the live plot moves.
+bool have_nn_overlay=false;
+uint32_t nn_overlay_end=0,nn_overlay_epoch=0;
+unsigned nn_overlay_count=0;
 ppg::BpmEstimator bpm_estimator; // independent IR-AC period estimate
 ppg::NnBpmEstimator nn_bpm_estimator; // PeakNet1D-derived beats, not DSP
 ppg::NnBpmEstimator::Result nn_bpm_result={false,0,0,0};
@@ -92,6 +100,10 @@ uint32_t nn_epoch=0;
 int16_t bpm_window[ppg::BpmEstimator::N];
 ppg::BpmEstimator::Result bpm_result={false,0,0.0f,0};
 uint32_t last_bpm_eval=0;
+uint32_t next_frame=1,completed_frames=0,aborted_frames=0;
+uint32_t recent_latency_ms=0;
+// Implemented by host registry below; the UI does not need radio traffic.
+unsigned connected();
 TFT_eSPI tft;
 peaknet_ppg::Model model;
 noodle2::NoodleGraph graph;
@@ -217,70 +229,107 @@ void draw_bpm() {
 int wave_x(unsigned i) {
     return int(DRAW_LEFT + i*(DRAW_WIDTH-1)/(W-1));
 }
-void draw_ac_trace(const int16_t* data, int top, int bottom, uint32_t color) {
+// Render the samples that actually exist. Before the first 256 samples arrive,
+// the short trace grows from right to left without inventing older samples.
+void draw_ac_trace(const int16_t* data, unsigned first, int top, int bottom,
+                   uint32_t color) {
     tft.drawRect(6,top,308,bottom-top+1,TFT_DARKGREY);
     tft.drawFastHLine(DRAW_LEFT,(top+bottom)/2,DRAW_WIDTH,TFT_DARKGREY);
-    int minv=int(data[0]),maxv=int(data[0]);
-    for(unsigned i=1;i<W;++i) {
+    if(first>=W) return;
+    int minv=int(data[first]),maxv=int(data[first]);
+    for(unsigned i=first+1;i<W;++i) {
         const int v=int(data[i]);
-        if(v<minv)minv=v;
-        if(v>maxv)maxv=v;
+        if(v<minv) minv=v;
+        if(v>maxv) maxv=v;
     }
-    // Avoid division by zero for a flat signal without fake pulse-like noise.
     const int range=maxv-minv;
     auto plot_y=[&](unsigned i)->int {
         if(range==0)return (top+bottom)/2;
         return bottom-2-(int(data[i])-minv)*(bottom-top-4)/range;
     };
-    for(unsigned i=1;i<W;++i)
+    for(unsigned i=first+1;i<W;++i)
         tft.drawLine(wave_x(i-1),plot_y(i-1),wave_x(i),plot_y(i),color);
 }
-void draw_frame(bool has_window, unsigned num_marks, uint32_t usec) {
+
+// The display is a sensor consumer, NOT an inference-result consumer.
+// Snapshots are taken under the sensor lock and SPI rendering runs after
+// releasing it. No dependency on worker registration or FRAME_DONE.
+void draw_live_frame() {
+    uint32_t seen,epoch;
+    bool ready;
+    portENTER_CRITICAL(&sample_lock);
+    seen=samples_seen;
+    epoch=sensor_epoch;
+    ready=sensor_ready;
+    const unsigned count=seen<W?static_cast<unsigned>(seen):W;
+    const unsigned first=W-count;
+    for(unsigned i=0;i<count;++i) {
+        const uint32_t sample_index=seen-count+i;
+        ac_ir_wave[first+i]=ir_wave_ring[sample_index%W];
+        ac_red_wave[first+i]=red_wave_ring[sample_index%W];
+    }
+    portEXIT_CRITICAL(&sample_lock);
+
     draw_bpm();
     tft.fillRect(0,35,320,135,TFT_BLACK);
-    if(!has_window) {
-        tft.setTextColor(TFT_YELLOW,TFT_BLACK);
-        tft.setCursor(11,65);
-        if(!sensor_ready)tft.print("WAITING FOR MAX30100");
-        else tft.print("COLLECTING 256 SAMPLES...");
-        return;
-    }
-    draw_ac_trace(ac_ir_wave,IR_WAVE_TOP,IR_WAVE_BOT,TFT_GREEN);
-    draw_ac_trace(ac_red_wave,RED_WAVE_TOP,RED_WAVE_BOT,TFT_RED);
+    draw_ac_trace(ac_ir_wave,first,IR_WAVE_TOP,IR_WAVE_BOT,TFT_GREEN);
+    draw_ac_trace(ac_red_wave,first,RED_WAVE_TOP,RED_WAVE_BOT,TFT_RED);
     tft.setTextSize(1);
     tft.setTextColor(TFT_GREEN,TFT_BLACK);
     tft.setCursor(9,IR_WAVE_TOP+6);tft.print("IR");
     tft.setTextColor(TFT_RED,TFT_BLACK);
     tft.setCursor(9,RED_WAVE_TOP+6);tft.print("RED");
 
-    // NN candidate positions use source sample indices, drawn on the IR plot.
-    // The NN sees *both* raw channels; dots are NOT verified dicrotic peaks.
-    int ir_min=int(ac_ir_wave[0]),ir_max=ir_min;
-    for(unsigned j=1;j<W;++j) {
-        const int v=int(ac_ir_wave[j]);
-        if(v<ir_min)ir_min=v;
-        if(v>ir_max)ir_max=v;
-    }
-    for(unsigned i=EDGE;i<W-EDGE;++i)if(marks[i]) {
-        const int y=ir_max==ir_min ? (IR_WAVE_TOP+IR_WAVE_BOT)/2 :
-            IR_WAVE_BOT-2-(int(ac_ir_wave[i])-ir_min)*(IR_WAVE_BOT-IR_WAVE_TOP-4)/(ir_max-ir_min);
-        tft.fillCircle(wave_x(i),y,3,TFT_YELLOW);
+    // Old NN detections are indexed by their *original* 100-Hz sample
+    // numbers. Align with the current scrolling ring and discard off-screen
+    // markers (or everything after a FIFO/contact continuity break).
+    unsigned visible_marks=0;
+    if(have_nn_overlay && nn_overlay_epoch==epoch && seen>=W) {
+        int ir_min=int(ac_ir_wave[0]),ir_max=ir_min;
+        for(unsigned i=1;i<W;++i) {
+            const int v=int(ac_ir_wave[i]);
+            if(v<ir_min)ir_min=v;
+            if(v>ir_max)ir_max=v;
+        }
+        const int64_t offset=static_cast<int64_t>(nn_overlay_end)-seen;
+        for(unsigned i=EDGE;i<W-EDGE;++i)if(marks[i]) {
+            const int64_t screen_i=static_cast<int64_t>(i)+offset;
+            if(screen_i<0 || screen_i>=static_cast<int64_t>(W))continue;
+            const unsigned at=static_cast<unsigned>(screen_i);
+            const int y=ir_max==ir_min ? (IR_WAVE_TOP+IR_WAVE_BOT)/2 :
+              IR_WAVE_BOT-2-(int(ac_ir_wave[at])-ir_min)*(IR_WAVE_BOT-IR_WAVE_TOP-4)/(ir_max-ir_min);
+            tft.fillCircle(wave_x(at),y,3,TFT_YELLOW);
+            ++visible_marks;
+        }
     }
 
-    // Compact INT8 logit strip; raw scores, not calibrated probabilities.
+    // Display logits only after a valid inference result; the strip remains
+    // empty (rather than showing stale results) while the radio is offline.
     tft.drawRect(6,SCORE_TOP,308,SCORE_BOT-SCORE_TOP+1,TFT_DARKGREY);
-    for(unsigned i=0;i<W;i+=2) {
-        const int logit=int(model_logits[i]);
-        int bar=(logit+64)/12;
-        if(bar<0)bar=0;
-        if(bar>10)bar=10;
-        tft.drawFastVLine(wave_x(i),SCORE_BOT-bar,bar+1,TFT_CYAN);
+    if(have_nn_overlay && nn_overlay_epoch==epoch &&
+       seen>=nn_overlay_end && seen-nn_overlay_end<W) {
+        for(unsigned i=0;i<W;i+=2) {
+            const int64_t at=static_cast<int64_t>(i)+nn_overlay_end-seen;
+            if(at<0 || at>=static_cast<int64_t>(W))continue;
+            const int logit=int(model_logits[i]);
+            int bar=(logit+64)/12;
+            if(bar<0)bar=0;
+            if(bar>10)bar=10;
+            tft.drawFastVLine(wave_x(static_cast<unsigned>(at)),SCORE_BOT-bar,bar+1,TFT_CYAN);
+        }
     }
     tft.setTextColor(TFT_YELLOW,TFT_BLACK);
-    tft.setCursor(8,159);tft.printf("NN dots %u",num_marks);
+    tft.setCursor(8,159);
+    if(!ready)tft.print("WAITING FOR MAX30100");
+    else if(count<W)tft.printf("COLLECTING %u/256",count);
+    else if(!completed_frames) tft.printf("NN WAIT W=%u",connected());
+    else tft.printf("NN dots %u",visible_marks);
+    if(completed_frames) {
+        tft.setTextColor(TFT_WHITE,TFT_BLACK);
+        tft.setCursor(118,159);tft.printf("%lums",(unsigned long)recent_latency_ms);
+    }
     tft.setTextColor(TFT_WHITE,TFT_BLACK);
-    tft.setCursor(110,159);tft.printf("%.0fms",usec/1000.0f);
-    tft.setCursor(205,159);tft.print("Red+IR AC");
+    tft.setCursor(242,159);tft.print("IR+RED");
 }
 
 unsigned pick_candidates() {
@@ -328,9 +377,8 @@ struct Frame {
       stage(0),worker(0),source_worker(0),
       forward_stage(0),local_handoff(false),ir_waveform{0},red_waveform{0}{}
 } frames[MAX_OCCUPANCY];
-uint32_t next_frame=1,completed_frames=0,aborted_frames=0;
-uint32_t last_hello_ms=0,last_ui_ms=0,radio_errors=0,skipped_windows=0;
-uint32_t recent_latency_ms=0;
+ uint32_t last_hello_ms=0,last_ui_ms=0,last_wave_ui_ms=0;
+uint32_t radio_errors=0,skipped_windows=0;
 
 Frame* frame_for(uint32_t id) {
     for(unsigned i=0;i<MAX_OCCUPANCY;++i)if(frames[i].active && frames[i].id==id)return &frames[i];
@@ -394,6 +442,9 @@ void sync_nn_epoch(uint32_t current_epoch) {
         nn_bpm_estimator.reset();
         nn_bpm_result={false,0,0,0};
         nn_epoch=current_epoch;
+        have_nn_overlay=false;
+        nn_overlay_count=0;
+        memset(marks,0,sizeof(marks));
     }
 }
 void consume_result(Frame& f,const int8_t* logits) {
@@ -404,14 +455,21 @@ void consume_result(Frame& f,const int8_t* logits) {
     sync_nn_epoch(epoch);
     if(f.epoch!=epoch) {abort_frame(f,"sensor continuity changed");return;}
 
-    memcpy(model_logits,logits,W);
-    memcpy(ac_ir_wave,f.ir_waveform,sizeof(ac_ir_wave));
-    memcpy(ac_red_wave,f.red_waveform,sizeof(ac_red_wave));
-    const unsigned marks_found=pick_candidates();
+    // The waveform is always live; the result supplies *only* the NN overlay.
+    // Do not let a late, older frame replace a newer overlay.
+    unsigned marks_found=0;
+    if(!have_nn_overlay || f.sample_end>=nn_overlay_end) {
+        memcpy(model_logits,logits,W);
+        marks_found=pick_candidates();
+        nn_overlay_count=marks_found;
+        nn_overlay_end=f.sample_end;
+        nn_overlay_epoch=f.epoch;
+        have_nn_overlay=true;
+    }
     const unsigned nn_updates=nn_bpm_estimator.observe(f.sample_end,logits,seen);
     nn_bpm_result=nn_bpm_estimator.estimate(seen);
     recent_latency_ms=millis()-f.start_ms;
-    draw_frame(true,marks_found,recent_latency_ms*1000u);
+    // No TFT access here: the periodic live display loop runs independently.
     Serial.printf("FRAME_DONE id=%lu t_ms=%lu latency_ms=%lu dots=%u nn_new=%u "
                   "nn_bpm=%u nn_valid=%u nn_peaks=%u dsp_bpm=%u dsp_valid=%u complete=%lu\n",
         (unsigned long)f.id,(unsigned long)millis(),(unsigned long)recent_latency_ms,
@@ -443,7 +501,8 @@ void receive_radio(const noodlepipe::Message& m) {
         return;
     }
     if(host_tx.handle(m))return;
-    if(p.kind==noodlepipe::PREPARE || p.kind==noodlepipe::DATA) {
+    if(p.kind==noodlepipe::PREPARE || p.kind==noodlepipe::DATA ||
+       p.kind==noodlepipe::ACK_REQUEST) {
         // Only final logits come back to the host. No intermediate host relay.
         if(p.stage==noodlepipe::RESULT_STAGE)host_rx.handle(radio,m);
         return;
@@ -610,6 +669,8 @@ void setup() {
     Serial.printf("NOODLE_MAX_WORKERS=%u MAX_OCCUPANCY=%u HOST_OCCUPANCY=%u\n",
                   MAX_WORKERS, MAX_OCCUPANCY, HOST_OCCUPANCY);
     Serial.printf("NOODLE_TRANSPORT_CRC=%d (0=OFF, 1=ON)\n", NOODLE_TRANSPORT_CRC);
+    Serial.printf("NOODLE_ACK_INTERVAL=%d (4=baseline, 18=whole tensor)\n",
+                  NOODLE_ACK_INTERVAL);
     if(!radio.begin(0))fatal("ESP-NOW INITIALIZATION FAILED");
     Serial.printf("RADIO host=%02X:%02X:%02X:%02X:%02X:%02X channel=%u\n",
         radio.address()[0],radio.address()[1],radio.address()[2],radio.address()[3],
@@ -618,7 +679,7 @@ void setup() {
     Wire.setClock(PPG_I2C_HZ);
     if(xTaskCreatePinnedToCore(sensor_task,"ppg_fifo",4096,nullptr,3,nullptr,0)!=pdPASS)
         fatal("SENSOR TASK FAILED");
-    draw_frame(false,0,0);
+    draw_live_frame();
 }
 
 void loop() {
@@ -642,11 +703,13 @@ void loop() {
     portEXIT_CRITICAL(&sample_lock);
     sync_nn_epoch(epoch);
     refresh_bpm(seen);
+    if(now-last_wave_ui_ms>=PPG_UI_REFRESH_MS) {
+        last_wave_ui_ms=now;
+        nn_bpm_result=nn_bpm_estimator.estimate(seen);
+        draw_live_frame();
+    }
     if(now-last_ui_ms>=2000) {
         last_ui_ms=now;
-        nn_bpm_result=nn_bpm_estimator.estimate(seen);
-        if(!completed_frames)draw_frame(false,0,0);
-        else draw_bpm();
         const unsigned active=active_frames();
         const unsigned online=connected();
         const unsigned idle=idle_workers();

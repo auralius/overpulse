@@ -24,9 +24,10 @@ static_assert(NOODLE_TRANSPORT_CRC==0 || NOODLE_TRANSPORT_CRC==1,
               "NOODLE_TRANSPORT_CRC must be 0 or 1");
 namespace noodlepipe {
 static const uint16_t MAGIC = 0x324E;
-// Version 3: deterministic STA MAC and one-byte destination worker ID in FORWARD.
-// Deliberately not wire-compatible with the dynamic-MAC version 2.
-static const uint8_t VERSION = 3;
+// Version 4: deterministic MAC + ID-only forwarding retained from v3;
+// ACK uses the 32-bit crc field as a bitmap, and PREPARE negotiates the
+// compile-time ACK interval. Deliberately not wire-compatible with v3.
+static const uint8_t VERSION = 4;
 static const uint8_t HOST_ID = 0;
 static const uint8_t MAX_WORKERS = NOODLE_MAX_WORKERS;
 inline bool worker_id_valid(uint8_t id) { return id>=1 && id<=MAX_WORKERS; }
@@ -51,7 +52,8 @@ inline bool node_mac_matches(uint8_t id, const uint8_t received[6]) {
     return received && node_mac(id,expected) && memcmp(received,expected,6)==0;
 }
 enum Kind : uint8_t { HELLO=1, PREPARE=2, PREPARED=3, DATA=4, ACK=5,
-                     DONE=6, FORWARD=7, RELEASE=8, ERROR_PACKET=9, RUN_LOCAL=10 };
+                     DONE=6, FORWARD=7, RELEASE=8, ERROR_PACKET=9, RUN_LOCAL=10,
+                     ACK_REQUEST=11 };
 #pragma pack(push,1)
 struct Packet {
     uint16_t magic; uint8_t version; uint8_t kind;

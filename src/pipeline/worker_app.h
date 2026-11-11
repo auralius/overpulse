@@ -90,7 +90,7 @@ void receive(const noodlepipe::Message& msg) {
     if(p.kind==noodlepipe::HELLO && p.sender==noodlepipe::HOST_ID)return;
     // The sender owns output storage until all fragment ACKs are received.
     if(tx.handle(msg))return;
-    if(p.kind==noodlepipe::DATA) {
+    if(p.kind==noodlepipe::DATA || p.kind==noodlepipe::ACK_REQUEST) {
         // Also ACK duplicate final fragments after the compute has completed.
         rx.handle(radio,msg);
         return;
@@ -140,6 +140,8 @@ void setup() {
         Serial.println("FATAL: ESP-NOW init failed");for(;;)delay(1000);
     }
     Serial.printf("NOODLE_TRANSPORT_CRC=%d (0=OFF, 1=ON)\n", NOODLE_TRANSPORT_CRC);
+    Serial.printf("NOODLE_ACK_INTERVAL=%d (4=baseline, 18=whole tensor)\n",
+                  NOODLE_ACK_INTERVAL);
     Serial.printf("NOODLE_WORKER_ACTIVATION_STATS=%d (0=OFF, 1=ON)\n", NOODLE_WORKER_ACTIVATION_STATS);
     Serial.printf("MAC %02X:%02X:%02X:%02X:%02X:%02X channel=%u heap=%lu\n",
         radio.address()[0],radio.address()[1],radio.address()[2],
