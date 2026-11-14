@@ -43,7 +43,7 @@ host-side sensor-driver upgrade and is **not yet supported** by this package.
 - **DSP BPM** estimated independently from filtered IR autocorrelation
 - **Independent live waveform display** on the CYD: **Red** and **IR** traces continue even if no ESP8266 is online
 - **CRC optional** transport mode (`NOODLE_TRANSPORT_CRC=0/1`)
-- **Configurable selective ACK interval**: 4 (baseline), 8, or 18 (one bitmap ACK for 4 KiB tensors)
+- **Configurable selective ACK interval**: 4, 8, or 18 (one bitmap ACK for 4 KiB tensors)
 - **ACK_REQUEST recovery** for lost final fragments and lost group acknowledgments
 - **Host admission and occupancy control** for multi-frame pipeline scheduling
 
@@ -60,10 +60,10 @@ host-side sensor-driver upgrade and is **not yet supported** by this package.
 - **Window stride:** **64 samples**
 - **Wireless transport:** ESP-NOW v1-compatible
 - **Channel:** 6
-- **Transport pacing:** 2 ms
-- **ACK interval:** 4 fragments (baseline); 18 is whole-tensor experimental mode
-- **Application protocol:** v4 (deterministic MAC and ID-only forwarding retained)
-- **CRC:** disabled in the latest fast baseline
+- **Transport pacing:** 1 ms
+- **ACK interval:** 18 fragments
+- **Application protocol:** deterministic ID-only forwarding
+- **CRC:** disabled
 
 Observed end-to-end latency in the latest working setup was about **830–860 ms** with CRC disabled.
 
@@ -122,9 +122,7 @@ pio run -e worker9 -t upload
 
 ## Deterministic worker identities (protocol v3)
 
-Each device uses a fixed, locally administered Wi-Fi station MAC derived from its node ID: host `02:4E:44:4C:00:00`, workers W1..W9 `02:4E:44:4C:00:01` through `...:09`. The host sends only the **destination worker ID** in `FORWARD`, and workers derive the MAC locally. All peers are registered at boot. This is **not cryptographic authentication**.
-
-**Important:** Reflash **all 10 devices** when upgrading to ACK-interval protocol v4. It intentionally rejects protocol v3 messages and mismatched ACK interval or CRC settings. See `TECHNICAL_DETAILS.md` for implementation details.
+Each device uses a fixed, locally administered Wi-Fi station MAC derived from its node ID: host `02:4E:44:4C:00:00`, workers W1..W9 `02:4E:44:4C:00:01` through `...:09`. The host sends only the **destination worker ID** in `FORWARD`, and workers derive the MAC locally. All peers are registered at boot.
 
 ## Configuration knobs
 
@@ -132,12 +130,12 @@ Some key build flags currently used:
 
 ```ini
 -D NOODLE_MAX_WORKERS=9
--D NOODLE_MAX_OCCUPANCY=5
+-D NOODLE_MAX_OCCUPANCY=8
 -D NOODLE_HOST_OCCUPANCY=3
 -D NOODLE_RESERVED_WORKERS=1
 -D NOODLE_TRANSPORT_CRC=0
--D NOODLE_ACK_INTERVAL=4
--D NOODLE_ESPNOW_PACING_MS=2
+-D NOODLE_ACK_INTERVAL=18
+-D NOODLE_ESPNOW_PACING_MS=1
 -D PPG_LED_CONFIG=0x77
 ```
 
@@ -230,16 +228,6 @@ A particularly important implementation detail:
 ## License / release note
 
 This repository is prepared as a clean publication snapshot, without the historical incremental README files used during development.
-
----
-
-## Live waveform display (host-side update)
-
-The ESP32-S3 updates both Red/IR traces directly from its filtered sensor ring
-about every **400 ms** (`PPG_UI_REFRESH_MS=400`) whether workers are online,
-frames have completed, or NN BPM is valid. NN markers are time-aligned to
-their original samples and disappear as they leave the scrolling window.
-DSP BPM remains fully independent of wireless inference.
 
 ---
 
