@@ -23,6 +23,9 @@ The project began as an intentionally overengineered heartbeat counter, but it a
 
 ![OVERPULSE hardware setup](docs/overpulse_hardware.jpg)
 
+https://github.com/user-attachments/assets/8dbacf89-0eab-4d13-8e8f-18bc4e772a5a
+
+
 **Shown above:** the ESP32-S3 CYD host, the MAX30100 sensor, and a 9-worker ESP8266 setup used for the latest OVERPULSE experiments.
 
 The current acquisition driver targets **MAX30100**; MAX30102 is a future
