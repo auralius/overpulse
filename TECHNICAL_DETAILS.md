@@ -281,7 +281,7 @@ B-->>H: DONE, assigned stage completed
 Note over H,C: Intermediate stage assignments repeat dynamically
 H->>C: Direct final-result destination = host
 C->>H: Final INT8 peak logits<br/>256 B
-Note over H: Compute NN BPM; render NN and DSP BPM
+Note over H: Compute NN BPM, render NN and DSP BPM
 ```
 
 *Illustrative only: A/B/C do not imply fixed stage assignments. The actual five stages can be routed through any available worker, including same-worker execution when needed.*
