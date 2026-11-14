@@ -265,23 +265,23 @@ OVERPULSE has **two cooperating producer–consumer boundaries**.
 
 ```mermaid
 sequenceDiagram
-    participant S as MAX30100
-    participant H as ESP32-S3 host
-    participant A as Worker A
-    participant B as Worker B
-    participant C as Worker C
-    S-->>H: Raw IR and Red, 100 Hz
-    Note over H: Window normalization, admit frame n
-    H->>A: PREPARE + fragmented input<br/>[2,256] INT8, 512 B
-    A-->>H: DONE, Conv1 completed
-    H->>A: FORWARD, choose Worker B
-    A->>B: Direct INT8 activation transfer<br/>ACK and bitmap retransmission
-    A-->>H: RELEASE
-    B-->>H: DONE, assigned stage completed
-    Note over H,C: Intermediate stage assignments repeat dynamically
-    H->>C: Direct final-result destination = host
-    C->>H: Final INT8 peak logits<br/>256 B
-    Note over H: Compute NN BPM; render NN and DSP BPM
+participant S as MAX30100
+participant H as ESP32-S3 host
+participant A as Worker A
+participant B as Worker B
+participant C as Worker C
+S-->>H: Raw IR and Red, 100 Hz
+Note over H: Window normalization, admit frame n
+H->>A: PREPARE + fragmented input<br/>[2,256] INT8, 512 B
+A-->>H: DONE, Conv1 completed
+H->>A: FORWARD, choose Worker B
+A->>B: Direct INT8 activation transfer<br/>ACK and bitmap retransmission
+A-->>H: RELEASE
+B-->>H: DONE, assigned stage completed
+Note over H,C: Intermediate stage assignments repeat dynamically
+H->>C: Direct final-result destination = host
+C->>H: Final INT8 peak logits<br/>256 B
+Note over H: Compute NN BPM; render NN and DSP BPM
 ```
 
 *Illustrative only: A/B/C do not imply fixed stage assignments. The actual five stages can be routed through any available worker, including same-worker execution when needed.*
